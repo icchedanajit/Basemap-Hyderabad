@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Hyderabad Web GIS</title>
+  <meta charset="utf-8" />
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.fullscreen/Control.FullScreen.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-search@3.0.4/dist/leaflet-search.min.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+
+
+  <style>
+    #map { height: 100vh; }
+
+    .legend {
+      background: white;
+      padding: 10px;
+      font-size: 13px;
+      line-height: 18px;
+      color: #333;
+    }
+
+    .legend i {
+      width: 12px;
+      height: 12px;
+      float: left;
+      margin-right: 8px;
+    }
+
+    .query-btn {
+      background: white;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 13px;
+      border: 1px solid #999;
+    }
+
+    .layer-dropdown {
+  background: white;
+  padding: 6px 8px;
+  font-size: 13px;
+  border: 1px solid #999;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.layer-dropdown img {
+  width: 16px;
+  height: 16px;
+}
+
+.coord-search {
+  background: white;
+  padding: 6px 8px;
+  border: 1px solid #999;
+  font-size: 13px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.coord-search input {
+  width: 140px;
+  font-size: 13px;
+  padding: 2px 4px;
+}
+
+
+  </style>
+</head>
+
+<body>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.fullscreen/Control.FullScreen.js"></script>
+<script src="https://unpkg.com/leaflet-search@3.0.4/dist/leaflet-search.min.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script src="https://unpkg.com/leaflet-geometryutil@0.10.0/src/leaflet.geometryutil.js"></script>
+<script src="https://unpkg.com/tokml@0.4.0/tokml.js"></script>
+
+
+<script>
+/* ================================
+   GLOBALS
+================================ */
+var map, boundaryLayer, pointLayer;
+var queryMode = false;
+var queryLayer = L.layerGroup();
+var highlightedLayer = null;
+
+
+
+/* ================================
+   MAP
+================================ */
+map = L.map('map', { fullscreenControl: true })
+  .setView([17.385, 78.4867], 11);
+
+  /* ================================
+   DRAWN FEATURES STORAGE
+================================ */
+var drawnItems = new L.FeatureGroup();
+map.addLayer(drawnItems);
+
+/* ================================
+   DRAW TOOLS
+================================ */
+var drawControl = new L.Control.Draw({
+  position: 'topleft',
+  draw: {
+    marker: true,      // Point
+    polyline: true,    // Path
+    polygon: true,     // Polygon
+    rectangle: false,
+    circle: false,
+    circlemarker: false
+  },
+  edit: {
+    featureGroup: drawnItems,
+    remove: true
+  }
+});
+
+map.addControl(drawControl);
+
+/* ================================
+   DRAW RESULT HANDLING
+================================ */
+map.on(L.Draw.Event.CREATED, function (e) {
+  var layer = e.layer;
+  drawnItems.addLayer(layer);
+
+  // POINT → LAT / LON
+  if (e.layerType === 'marker') {
+    var ll = layer.getLatLng();
+    layer.bindPopup(
+      "<b>Point</b><br>" +
+      "Lat: " + ll.lat.toFixed(6) + "<br>" +
+      "Lon: " + ll.lng.toFixed(6)
+    ).openPopup();
+  }
+
+  // LINE → LENGTH
+  if (e.layerType === 'polyline') {
+    var length = L.GeometryUtil.length(layer.getLatLngs());
+    layer.bindPopup(
+      "<b>Length</b><br>" +
+      length.toFixed(2) + " meters<br>" +
+      (length / 1000).toFixed(3) + " km"
+    ).openPopup();
+  }
+
+  // POLYGON → AREA
+  if (e.layerType === 'polygon') {
+    var area = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+    layer.bindPopup(
+      "<b>Area</b><br>" +
+      area.toFixed(2) + " sq.m<br>" +
+      (area / 1e6).toFixed(4) + " sq.km"
+    ).openPopup();
+  }
+});
+
+/* ================================
+   EXPORT DRAWN FEATURES AS KML
+================================ */
+var exportControl = L.control({ position: 'topleft' });
+
+exportControl.onAdd = function () {
+  var div = L.DomUtil.create('div', 'query-btn');
+  div.innerHTML = "Export KML";
+
+  div.onclick = function () {
+    var geojson = drawnItems.toGeoJSON();
+    var kml = tokml(geojson);
+
+    var blob = new Blob([kml], {
+      type: 'application/vnd.google-earth.kml+xml'
+    });
+
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'drawn_features.kml';
+    link.click();
+  };
+  
+
+  return div;
+};
+
+exportControl.addTo(map);
+
+
+
+/* ================================
+   BASE MAPS
+================================ */
+var street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}');
+var dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+var hybrid = L.layerGroup([
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'),
+  L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}')
+]);
+var light = L.tileLayer(
+  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+);
+var grey = L.tileLayer(
+  'https://tiles.wmflabs.org/bw-mapnik/{z}/{x}/{y}.png'
+);
+var terrain = L.tileLayer(
+  'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png'
+);
+var topo = L.tileLayer(
+  'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png'
+);
+
+var dropdownControl = L.control({ position: 'topright' });
+
+dropdownControl.onAdd = function () {
+  var div = L.DomUtil.create('div', 'layer-dropdown');
+
+  div.innerHTML = `
+    <img src="https://cdn-icons-png.flaticon.com/512/684/684908.png" alt="map">
+    <select id="basemapSelect">
+      <option value="street">Street</option>
+      <option value="satellite">Satellite</option>
+      <option value="dark">Dark</option>
+      <option value="hybrid">Hybrid</option>
+      <option value="light">Light</option>
+      <option value="grey">Grey</option>
+      <option value="terrain">Terrain</option>
+      <option value="topo">Topo</option>
+    </select>
+  `;
+
+  L.DomEvent.disableClickPropagation(div);
+  return div;
+};
+
+dropdownControl.addTo(map);
+
+var baseLayerMap = {
+  street: street,
+  satellite: satellite,
+  dark: dark,
+  hybrid: hybrid,
+  light: light,
+  grey: grey,
+  terrain: terrain,
+  topo: topo
+};
+
+document.getElementById('basemapSelect').addEventListener('change', function (e) {
+
+  // remove existing base layers
+  Object.values(baseLayerMap).forEach(layer => {
+    if (map.hasLayer(layer)) {
+      map.removeLayer(layer);
+    }
+  });
+
+  // add selected layer
+  map.addLayer(baseLayerMap[e.target.value]);
+});
+
+
+
+
+/* ================================
+   COLORS
+================================ */
+function getColor(cat) {
+  return cat === "COMMUNITY HALLS" ? "red" :
+         cat === "HOSPITALS" ? "blue" :
+         cat === "SCHOOLS" ? "orange" : 
+         cat === "FIRE STATIONS" ? "green" :
+         cat === "HERITAGE BUILDINGS" ? "skyblue" :
+         cat === "MARKET COMPLEXES" ? "lightgreen" :
+         cat === "NIGHT SHELTERS" ? "pink" :
+         cat === "PLAY GROUNDS" ? "brown" :
+         cat === "TOILETS" ? "lightgrey" :
+         cat === "TRANSFER STATIONS" ? "grey" :
+         cat === "WATER STAGNATION" ? "lightblue" :
+          "purple";
+
+}
+
+/* ================================
+   CATEGORY FILTER FUNCTION
+================================ */
+function filterByCategory(category, show) {
+  if (!pointLayer) return;   // safety check
+
+  pointLayer.eachLayer(function (layer) {
+    if (layer.feature.properties.category === category) {
+      if (show) {
+        layer.addTo(map);
+      } else {
+        map.removeLayer(layer);
+      }
+    }
+  });
+}
+
+
+/* ================================
+   BOUNDARY
+================================ */
+boundaryLayer = L.geoJSON(null, {
+  style: { color: "blue", weight: 2, fillOpacity: 0.1 }
+}).addTo(map);
+
+fetch("data.geojson")
+  .then(r => r.json())
+  .then(d => {
+    boundaryLayer.addData(d);
+    map.fitBounds(boundaryLayer.getBounds());
+    layerControl.addOverlay(boundaryLayer, "Boundary");
+  });
+
+/* ================================
+   POINTS + SEARCH
+================================ */
+function parseLatLng(text) {
+  var parts = text.split(/[, ]+/);
+  if (parts.length !== 2) return null;
+
+  var lat = parseFloat(parts[0]);
+  var lng = parseFloat(parts[1]);
+
+  if (isNaN(lat) || isNaN(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+
+  return L.latLng(lat, lng);
+}
+
+fetch("points.geojson")
+  .then(function (response) {
+    if (!response.ok) {
+      throw new Error("Points GeoJSON not loaded");
+    }
+    return response.json();
+  })
+  .then(function (data) {
+
+  pointLayer = L.geoJSON(data, {
+    pointToLayer: function (feature, latlng) {
+      return L.circleMarker(latlng, {
+        radius: 7,
+        fillColor: getColor(feature.properties.category),
+        color: "#000",
+        weight: 1,
+        fillOpacity: 0.9
+      });
+    },
+
+    onEachFeature: function (feature, layer) {
+      layer.bindPopup(
+        "<b>" + feature.properties.category + "</b><br>" +
+        "Ward: " + feature.properties.ward + "<br>" +
+        "Zone: " + feature.properties.zone + "<br>" +
+        "Address: " + feature.properties.address
+      );
+    }
+  });
+
+  pointLayer.addTo(map);
+  var search = new L.Control.Search({
+  layer: pointLayer,
+  propertyName: 'address',
+  propertyLoc: ['lat','lng'],   // 👈 THIS IS THE MISSING PIECE
+  marker: false,
+  moveToLocation: function (latlng) {
+    map.setView(latlng, 16);
+  }
+});
+
+
+  /* 🔍 SEARCH — MUST BE HERE */
+
+  var search = new L.Control.Search({
+  layer: pointLayer,
+  propertyName: 'address',
+  marker: false,
+  moveToLocation: function (latlng, title, map) {
+    map.setView(latlng, 16);
+  }
+});
+search.on('search:expanded', function (e) {
+
+  var input = document.querySelector('.search-input');
+
+  input.addEventListener('keydown', function (evt) {
+    if (evt.key !== 'Enter') return;
+
+    var latlng = parseLatLng(input.value);
+    if (!latlng) return;
+
+    map.setView(latlng, 16);
+
+    var marker = L.marker(latlng).addTo(map)
+      .bindPopup(
+        "<b>Coordinates</b><br>" +
+        "Lat: " + latlng.lat.toFixed(6) + "<br>" +
+        "Lon: " + latlng.lng.toFixed(6)
+      )
+      .openPopup();
+  });
+});
+
+
+  search.on('search:locationfound', function(e) {
+
+    if (highlightedLayer) {
+      highlightedLayer.setStyle({
+        radius: 7,
+        fillColor: getColor(highlightedLayer.feature.properties.category),
+        fillOpacity: 0.9
+      });
+    }
+
+    highlightedLayer = e.layer;
+
+    e.layer.setStyle({
+      radius: 12,
+      fillColor: "yellow",
+      color: "black",
+      weight: 2,
+      fillOpacity: 1
+    });
+
+    highlightedLayer.openPopup();
+  });
+
+  map.addControl(search);
+})
+
+var coordMarker = null;
+
+var coordSearch = L.control({ position: 'topright' });
+
+coordSearch.onAdd = function () {
+  var div = L.DomUtil.create('div', 'coord-search');
+
+  div.innerHTML = `
+    <span title="Search by Lat, Lon">📍</span>
+    <input type="text" id="coordInput" placeholder="17.385, 78.4867">
+  `;
+
+  L.DomEvent.disableClickPropagation(div);
+
+  return div;
+};
+
+coordSearch.addTo(map);
+
+document.addEventListener('keydown', function (e) {
+
+  if (e.key !== 'Enter') return;
+
+  var input = document.getElementById('coordInput');
+  if (!input) return;
+
+  var value = input.value.trim();
+  if (!value) return;
+
+  var parts = value.split(/[, ]+/);
+  if (parts.length !== 2) {
+    alert("Enter coordinates like: 17.385, 78.4867");
+    return;
+  }
+
+  var lat = parseFloat(parts[0]);
+  var lng = parseFloat(parts[1]);
+
+  if (isNaN(lat) || isNaN(lng)) {
+    alert("Invalid numbers");
+    return;
+  }
+
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    alert("Invalid latitude or longitude");
+    return;
+  }
+
+  var latlng = L.latLng(lat, lng);
+
+  map.setView(latlng, 16);
+
+  if (coordMarker) {
+    map.removeLayer(coordMarker);
+  }
+
+  coordMarker = L.marker(latlng).addTo(map)
+    .bindPopup(
+      "<b>Coordinates</b><br>" +
+      "Lat: " + lat.toFixed(6) + "<br>" +
+      "Lon: " + lng.toFixed(6)
+    )
+    .openPopup();
+});
+
+
+
+/* ================================
+   QUERY MODE BUTTON
+================================ */
+var QueryControl = L.control({ position: 'topleft' });
+
+QueryControl.onAdd = function () {
+  var div = L.DomUtil.create('div', 'query-btn');
+  div.innerHTML = "Query: OFF";
+
+  div.onclick = function () {
+    queryMode = !queryMode;
+    div.innerHTML = queryMode ? "Query: ON" : "Query: OFF";
+    queryLayer.clearLayers();
+  };
+
+  return div;
+};
+
+QueryControl.addTo(map);
+
+/* ================================
+   QUERY CLICK (SAFE)
+================================ */
+map.on('click', function (e) {
+  if (!queryMode || !pointLayer) return;
+
+  queryLayer.clearLayers();
+  queryLayer.addTo(map);
+
+  pointLayer.eachLayer(layer => {
+    if (e.latlng.distanceTo(layer.getLatLng()) <= 500) {
+      layer.setStyle({ radius: 10, fillColor: "cyan" });
+      queryLayer.addLayer(layer);
+    } else {
+      layer.setStyle({
+        radius: 7,
+        fillColor: getColor(layer.feature.properties.category)
+      });
+    }
+  });
+
+  L.circle(e.latlng, {
+    radius: 500,
+    color: "cyan",
+    fillOpacity: 0.1
+  }).addTo(queryLayer);
+});
+
+/* ================================
+   LEGEND WITH CHECKBOX + COLOR
+================================ */
+var legend = L.control({ position: 'bottomright' });
+
+legend.onAdd = function () {
+  var div = L.DomUtil.create('div', 'legend');
+
+  div.innerHTML = `
+    <b>Category</b><br>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('COMMUNITY HALLS', this.checked)">
+      <span style="width:12px;height:12px;background:red;display:inline-block;"></span>
+      Community Halls
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('HOSPITALS', this.checked)">
+      <span style="width:12px;height:12px;background:blue;display:inline-block;"></span>
+      Hospitals
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('SCHOOLS', this.checked)">
+      <span style="width:12px;height:12px;background:orange;display:inline-block;"></span>
+      Schools
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('FIRE STATIONS', this.checked)">
+      <span style="width:12px;height:12px;background:green;display:inline-block;"></span>
+      Others
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('HERITAGE BUILDINGS', this.checked)">
+      <span style="width:12px;height:12px;background:skyblue;display:inline-block;"></span>
+      Heritage Buildings
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('MARKET COMPLEXES', this.checked)">
+      <span style="width:12px;height:12px;background:lightgreen;display:inline-block;"></span>
+      Market Complexes
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('NIGHT SHELTERS', this.checked)">
+      <span style="width:12px;height:12px;background:pink;display:inline-block;"></span>
+      Night Shelters
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('PLAY GROUNDS', this.checked)">
+      <span style="width:12px;height:12px;background:brown;display:inline-block;"></span>
+      Play Grounds
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('TOILETS', this.checked)">
+      <span style="width:12px;height:12px;background:lightgrey;display:inline-block;"></span>
+      Toilets
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('TRANSFER STATIONS', this.checked)">
+      <span style="width:12px;height:12px;background:grey;display:inline-block;"></span>
+      Transfer Stations
+    </label>
+
+    <label style="display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" checked
+        onchange="filterByCategory('WATER STAGNATION', this.checked)">
+      <span style="width:12px;height:12px;background:lightblue;display:inline-block;"></span>
+      Water Stagnation
+    </label>
+  `;
+
+  // prevent map click when clicking legend
+  L.DomEvent.disableClickPropagation(div);
+
+  return div;
+};
+
+legend.addTo(map);
+
+</script>
+</body>
+</html>
+
+
+
+
